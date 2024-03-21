@@ -27,7 +27,7 @@ interface FileContextSnippet {
     endLine: number
     content: string
 }
-interface SymbolContextSnippet extends FileContextSnippet {
+export interface SymbolContextSnippet extends FileContextSnippet {
     symbol: string
 }
 export type ContextSnippet = FileContextSnippet | SymbolContextSnippet
@@ -71,4 +71,32 @@ export interface ContextRetriever extends vscode.Disposable {
      * Return true if the retriever supports the given languageId.
      */
     isSupportedForLanguageId(languageId: string): boolean
+}
+
+export interface PreciseContext {
+    symbol: {
+        fuzzyName?: string
+    }
+    hoverText: string[]
+    definitionSnippet: string
+    filePath: string
+    range?: {
+        startLine: number
+        startCharacter: number
+        endLine: number
+        endCharacter: number
+    }
+}
+
+export interface HoverContext {
+    symbolName: string
+    sourceSymbolName?: string
+    content: string[]
+    uri: string
+    range: {
+        startLine: number
+        startCharacter: number
+        endLine: number
+        endCharacter: number
+    }
 }

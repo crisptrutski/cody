@@ -1,7 +1,8 @@
-import type * as vscode from 'vscode'
+import * as vscode from 'vscode'
 
 import { execQueryWrapper } from '../../../../tree-sitter/query-sdk'
 
+import { dedupeWith } from '@sourcegraph/cody-shared'
 import { asPoint } from '../../../../tree-sitter/parse-tree-cache'
 import { parseString } from '../../../../tree-sitter/parser'
 import { lines } from '../../../text-processing'
@@ -10,13 +11,19 @@ interface GetLastNGraphContextIdentifiersFromDocumentParams {
     n: number
     document: vscode.TextDocument
     position: vscode.Position
-    currentLinePrefix: string
+}
+
+interface SymbolRequest {
+    symbolName: string
+    position: vscode.Position
+    uri: vscode.Uri
+    nodeType: string
 }
 
 export function getLastNGraphContextIdentifiersFromDocument(
     params: GetLastNGraphContextIdentifiersFromDocumentParams
-): string[] {
-    const { document, currentLinePrefix, position, n } = params
+): SymbolRequest[] {
+    const { document, position, n } = params
 
     const queryPoints = {
         startPoint: asPoint({
@@ -25,26 +32,35 @@ export function getLastNGraphContextIdentifiersFromDocument(
         }),
         endPoint: asPoint({
             line: position.line,
-            character: currentLinePrefix.length,
+            character: position.character + 1,
         }),
     }
 
-    const identifiers = execQueryWrapper({
+    const symbolRequests = execQueryWrapper({
         document,
         queryPoints,
         queryWrapper: 'getGraphContextIdentifiers',
     })
-        .map(identifier => identifier.node.text)
-        .filter(identifier => identifier.length > 2)
+        .map(identifier => {
+            return {
+                uri: document.uri,
+                nodeType: identifier.node.type,
+                symbolName: identifier.node.text,
+                position: new vscode.Position(
+                    identifier.node.startPosition.row,
+                    identifier.node.startPosition.column
+                ),
+            }
+        })
+        .sort((a, b) => (a.position.isBefore(b.position) ? 1 : -1))
 
-    return Array.from(new Set(identifiers.reverse())).slice(0, n)
+    return dedupeWith(symbolRequests, 'symbolName').slice(0, n)
 }
 
 interface GetLastNGraphContextIdentifiersFromStringParams {
     n: number
     document: vscode.TextDocument
     position: vscode.Position
-    currentLinePrefix: string
     /**
      * Parse this source string to get the tree for the tree-sitter query
      * instead of using `document.getText()`

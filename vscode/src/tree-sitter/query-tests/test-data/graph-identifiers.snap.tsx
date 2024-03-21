@@ -30,19 +30,22 @@
 
 // ------------------------------------
 
-  function testParams(): TestType {
-//                       ^^^^^^^^ identifier[1]
+  function testParams(arg: TestType): TestType {
+//                         ^^^^^^^^ identifier[1]
+//                                    ^^^^^^^^ identifier[2]
       const result: Agent = {
-//                  ^^^^^ identifier[2]
+//                  ^^^^^ identifier[3]
           value: 1,
           key: 'foo',
       }
+      const value = wrapper
+//                  ^^^^^^^ identifier[4]
       pick(result, ['value'])
-//    ^^^^ identifier[3]
+//    ^^^^ identifier[5]
       Agent.test()
-//          ^^^^ identifier[4]
+//          ^^^^ identifier[6]
       wrapper
-//    ^^^^^^^ identifier[5]
+//    ^^^^^^^ identifier[7]
 //           █
       return result
   }
@@ -50,9 +53,11 @@
 // Nodes types:
 // identifier[1]: type_identifier
 // identifier[2]: type_identifier
-// identifier[3]: identifier
-// identifier[4]: property_identifier
+// identifier[3]: type_identifier
+// identifier[4]: identifier
 // identifier[5]: identifier
+// identifier[6]: property_identifier
+// identifier[7]: identifier
 
 // ------------------------------------
 

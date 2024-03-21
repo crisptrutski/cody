@@ -691,3 +691,47 @@ export interface GetFoldingRangeParams {
 export interface GetFoldingRangeResult {
     ranges: Range[]
 }
+
+export function testLSP(params: CustomEditCommandResult) {
+    console.log(`
+    a
+    additionalDisplayItemsa
+    Aa
+    additionalDisplayItemsa
+    aria
+    a
+    a
+    Aa
+    Aa
+    Aa
+    Aaa
+    a
+    a
+    a
+    a
+    a
+    a
+    Aa
+    a
+    Aa
+    Aaa
+    Aaa
+    Aa
+    Aa
+    Aa
+    Aa
+    Aaa
+    a
+    a
+    a
+    a
+    Aa
+    Aa
+    aaAtomic
+    `)
+}
+
+export interface User {
+    name: string
+    lovesBanana: boolean
+}

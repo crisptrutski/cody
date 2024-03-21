@@ -193,6 +193,7 @@ const JS_SHARED_CONTEXT_IDENTIFIERS_QUERY = dedent`
     (call_expression function: (identifier) @identifier)
     (expression_statement (identifier) @identifier)
     (member_expression (property_identifier) @identifier)
+    (variable_declarator value: (identifier) @identifier)
 `
 
 const JS_GRAPH_CONTEXT_IDENTIFIERS_QUERY = dedent`
@@ -209,6 +210,7 @@ const TS_GRAPH_CONTEXT_IDENTIFIERS_QUERY = dedent`
     ${JS_SHARED_CONTEXT_IDENTIFIERS_QUERY}
     (extends_clause (identifier) @identifier)
     (type_annotation (type_identifier) @identifier)
+    (type_annotation (_ (type_identifier) @identifier))
 `
 
 const TSX_GRAPH_CONTEXT_IDENTIFIERS_QUERY = dedent`
