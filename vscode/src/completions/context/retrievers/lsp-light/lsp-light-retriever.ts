@@ -51,6 +51,9 @@ export class LspLightRetriever implements ContextRetriever {
         )
     }
 
+    // TODO: set a timeout on the retrieve call
+    // TODO: wrap individual LSP calls in OpenTelemetry traces with CPU usage data
+    // TODO: add checks for LSP availability
     public async retrieve(params: ContextRetrieverOptions): Promise<ContextSnippet[]> {
         const {
             document,
@@ -96,6 +99,7 @@ export class LspLightRetriever implements ContextRetriever {
             position,
         }
 
+        // TODO: reenable top level caching
         // const res = this.cache.get(request)
         // if (res) {
         //     return res
@@ -103,6 +107,7 @@ export class LspLightRetriever implements ContextRetriever {
 
         let finished = false
 
+        // TODO: walk up the tree to find identifiers on the closest parent start line
         const symbolRequests = getLastNGraphContextIdentifiersFromDocument({
             n: 10,
             document,

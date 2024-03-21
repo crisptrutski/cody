@@ -10,6 +10,7 @@ interface SymbolSnippetsRequest {
     nodeType: string
 }
 
+// TODO: use limiter for underlying LSP requests
 async function getSymbolSnippetForNodeType(
     params: SymbolSnippetsRequest
 ): Promise<SymbolContextSnippet[]> {
