@@ -1,3 +1,13 @@
-import { type AutocompleteResult, type Position, type User, testLSP } from './jsonrpc/agent-protocol'
+import { MyClass, User, testLSP, testTypeDef } from './jsonrpc/agent-protocol'
 
-const user: User
+const user: User = {
+    name: '<NAME>',
+    lovesBanana: true,
+}
+
+testLSP({
+    type: 'edit',
+    editResult: '',
+})
+
+const instance = new MyClass()

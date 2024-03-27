@@ -1,153 +1,304 @@
-import { isDefined } from '@sourcegraph/cody-shared'
 import { LRUCache } from 'lru-cache'
-import * as vscode from 'vscode'
+import type * as vscode from 'vscode'
+
+import { isDefined } from '@sourcegraph/cody-shared'
+
+import { getLastNGraphContextIdentifiersFromString } from '../../completions/context/retrievers/graph/identifiers'
 import type { SymbolContextSnippet } from '../../completions/types'
+import { commonKeywords } from './languages'
+import { createLimiter } from './limiter'
+import {
+    getDefinitionLocations,
+    getHover,
+    getImplementationLocations,
+    getTextFromLocation,
+    getTypeDefinitionLocations,
+} from './lsp'
+
+const limiter = createLimiter({
+    // The concurrent requests limit is chosen very conservatively to avoid blocking the language
+    // server.
+    limit: 3,
+    // If any language server API takes more than 2 seconds to answer, we should cancel the request
+    timeout: 2000,
+})
 
 interface SymbolSnippetsRequest {
     symbolName: string
     uri: vscode.Uri
     position: vscode.Position
     nodeType: string
+    languageId: string
 }
 
-// TODO: use limiter for underlying LSP requests
+type DefinitionCacheEntryPath = `${UriString}::${DefinitionCacheKey}`
+interface SymbolSnippetInflightRequest extends SymbolContextSnippet {
+    key: DefinitionCacheEntryPath
+    relatedDefinitionKeys?: Set<DefinitionCacheEntryPath>
+    location: vscode.Location
+}
+
+interface GetSymbolSnippetForNodeTypeParams {
+    symbolSnippetRequest: SymbolSnippetsRequest
+    recursionLimit: number
+    parentDefinitionCacheEntryPaths?: Set<DefinitionCacheEntryPath>
+    abortSignal: AbortSignal
+}
+
+type Optional<T, K extends keyof T> = Pick<Partial<T>, K> & Omit<T, K>
+type PartialSymbolSnippetInflightRequest = Optional<SymbolSnippetInflightRequest, 'content'>
+
+function updateParentDefinitionKeys(
+    parentDefinitionCacheEntryPaths: GetSymbolSnippetForNodeTypeParams['parentDefinitionCacheEntryPaths'],
+    symbolContextSnippet: PartialSymbolSnippetInflightRequest
+) {
+    if (parentDefinitionCacheEntryPaths) {
+        for (const parentDefinitionCacheEntryPath of parentDefinitionCacheEntryPaths) {
+            const [uriKey, definitionKey] = parentDefinitionCacheEntryPath.split('::')
+            definitionCache.cache
+                .get(uriKey)
+                ?.get(definitionKey)
+                ?.relatedDefinitionKeys?.add(symbolContextSnippet.key)
+        }
+    }
+}
+
 async function getSymbolSnippetForNodeType(
-    params: SymbolSnippetsRequest
-): Promise<SymbolContextSnippet[]> {
-    const { uri, position, nodeType, symbolName } = params
+    params: GetSymbolSnippetForNodeTypeParams
+): Promise<SymbolSnippetInflightRequest[] | undefined> {
+    const {
+        recursionLimit,
+        symbolSnippetRequest,
+        symbolSnippetRequest: { uri, position, nodeType, symbolName, languageId },
+        parentDefinitionCacheEntryPaths,
+        abortSignal,
+    } = params
+    async function getSnippetForLocationGetter(
+        locationGetter: typeof getDefinitionLocations
+    ): Promise<PartialSymbolSnippetInflightRequest | undefined> {
+        let definitionLocations = definitionLocationCache.get(symbolSnippetRequest)
 
-    // TODO: use workspace symbols to get symbol kind to help determine how to extract context snippet text
-    // const symbolInfo = await getWorkspaceSymbols(symbolName)
-    // console.log({ symbolInfo })
-
-    const uriString = uri.toString()
-    const locationCacheKey = `${position.line}:${position.character}:${nodeType}:${symbolName}`
-
-    // Get or create the nested cache for the file URI
-    let nestedLocationCache = definitionLocationCache.get(uriString)
-
-    if (!nestedLocationCache) {
-        nestedLocationCache = new LRUCache({ max: 100 })
-        definitionLocationCache.set(uriString, nestedLocationCache)
-    }
-
-    // Check if the locations are already cached
-    let definitionLocations = nestedLocationCache.get(locationCacheKey)
-    if (!definitionLocations) {
-        switch (nodeType) {
-            case 'property_identifier':
-            case 'type_identifier': {
-                definitionLocations = await getDefinitionLocations(uri, position)
-                break
-            }
-            default: {
-                definitionLocations = await getTypeDefinitionLocations(uri, position)
-                break
-            }
+        if (!definitionLocations) {
+            definitionLocations = await limiter(() => locationGetter(uri, position))
         }
-        definitionLocations = definitionLocations.length === 0 ? undefined : definitionLocations
-        nestedLocationCache.set(locationCacheKey, definitionLocations)
 
-        for (const location of definitionLocations || []) {
-            addToDocumentToCacheKeyMap(location.uri.toString(), `${uriString}::${locationCacheKey}`)
+        if (definitionLocations.length === 0) {
+            console.log(`no definition locations for ${symbolName} at ${uri} and ${position}`)
+            definitionLocationCache.delete(symbolSnippetRequest)
+            return undefined
         }
-    }
 
-    if (!definitionLocations) {
-        return []
-    }
+        const [definitionLocation] = definitionLocations
 
-    const hoverSnippets = await Promise.all(
-        definitionLocations.map(async location => {
-            const { uri: definitionUri, range } = location
-            const definitionUriString = definitionUri.toString()
-            const definitionCacheKey = `${range.start.line}:${range.start.character}`
+        const { uri: definitionUri, range: definitionRange } = definitionLocation
+        const definitionUriString = definitionUri.toString()
+        const definitionCacheKey = `${definitionRange.start.line}:${definitionRange.start.character}`
 
-            const symbolContextSnippet = {
-                uri: definitionUri,
-                startLine: range.start.line,
-                endLine: range.end.line,
-                symbol: symbolName,
-            } satisfies Omit<SymbolContextSnippet, 'content'>
+        const symbolContextSnippet = {
+            key: `${definitionUriString}::${definitionCacheKey}`,
+            uri: definitionUri,
+            startLine: definitionRange.start.line,
+            endLine: definitionRange.end.line,
+            symbol: symbolName,
+            location: definitionLocation,
+        } satisfies Omit<SymbolSnippetInflightRequest, 'content'>
 
-            // Get or create the nested cache for the definition URI
-            let nestedDefinitionCache = definitionCache.get(definitionUriString)
-            if (!nestedDefinitionCache) {
-                nestedDefinitionCache = new LRUCache({ max: 100 })
-                definitionCache.set(definitionUriString, nestedDefinitionCache)
-            }
-
-            // Check if the definition is already cached
-            const cachedDefinition = nestedDefinitionCache.get(definitionCacheKey)
-            if (cachedDefinition) {
-                return {
-                    ...symbolContextSnippet,
-                    content: cachedDefinition,
-                }
-            }
-
-            let extractedContent: string | undefined
-
-            switch (nodeType) {
-                case 'property_identifier':
-                case 'type_identifier': {
-                    extractedContent = await getTextFromLocation(location)
-                    break
-                }
-                default: {
-                    const hoverContent = await getHover(definitionUri, range.start)
-                    // TODO: add retries for interface and types
-                    // TODO: add recursion
-                    extractedContent = extractHoverContent(hoverContent).join('\n')
-                    break
-                }
-            }
-
-            extractedContent =
-                !extractedContent || extractedContent.length === 0 ? undefined : extractedContent
-
-            nestedDefinitionCache.set(definitionCacheKey, extractedContent)
-            addToDocumentToCacheKeyMap(
-                definitionUriString,
-                `${definitionUriString}:${definitionCacheKey}`
-            )
-
-            if (extractedContent === undefined) {
-                return undefined
-            }
+        const cachedDefinition = definitionCache.get(definitionLocation)
+        if (cachedDefinition) {
+            updateParentDefinitionKeys(parentDefinitionCacheEntryPaths, symbolContextSnippet)
 
             return {
                 ...symbolContextSnippet,
-                content: extractedContent,
+                ...cachedDefinition,
             }
+        }
+
+        let definitionString: string | undefined
+
+        switch (nodeType) {
+            case 'property_identifier':
+            case 'type_identifier': {
+                definitionString = await getTextFromLocation(definitionLocation)
+                break
+            }
+            default: {
+                const hoverContent = await limiter(
+                    () => getHover(definitionLocation.uri, definitionLocation.range.start),
+                    abortSignal
+                )
+                definitionString = extractHoverContent(hoverContent).join('\n')
+
+                if (isUnhelpfulSymbolSnippet(symbolName, definitionString)) {
+                    definitionString = await getTextFromLocation(definitionLocation)
+
+                    if (isUnhelpfulSymbolSnippet(symbolName, definitionString)) {
+                        return symbolContextSnippet
+                    }
+                }
+
+                break
+            }
+        }
+
+        definitionLocationCache.set(symbolSnippetRequest, definitionLocations)
+
+        return {
+            ...symbolContextSnippet,
+            content: definitionString,
+        }
+    }
+
+    let getters = [getTypeDefinitionLocations, getImplementationLocations, getDefinitionLocations]
+    if (['property_identifier', 'type_identifier'].includes(nodeType)) {
+        getters = [getDefinitionLocations, getTypeDefinitionLocations, getImplementationLocations]
+    }
+
+    let symbolContextSnippet: PartialSymbolSnippetInflightRequest | undefined
+    for (const getter of getters) {
+        symbolContextSnippet = await getSnippetForLocationGetter(getter)
+
+        if (symbolContextSnippet?.content !== undefined) {
+            break
+        }
+    }
+
+    if (!symbolContextSnippet) {
+        console.log(
+            `failed to find definition location for symbol ${symbolName} at ${uri} and ${position}`
+        )
+        return undefined
+    }
+
+    if (symbolContextSnippet.content === undefined) {
+        console.log(
+            `no definition for symbol ${symbolName} at ${symbolContextSnippet.uri} and ${symbolContextSnippet.startLine}`
+        )
+        definitionCache.delete(symbolContextSnippet.location)
+        return undefined
+    }
+
+    const { location: definitionLocation, content: definitionString } = symbolContextSnippet
+
+    definitionCache.set(definitionLocation, { content: definitionString })
+    updateParentDefinitionKeys(parentDefinitionCacheEntryPaths, symbolContextSnippet)
+
+    const symbolsSnippetRequests = getLastNGraphContextIdentifiersFromString({
+        n: 5,
+        uri: definitionLocation.uri,
+        languageId,
+        source: definitionString,
+    })
+        .filter(request => {
+            return symbolName !== request.symbolName && !commonKeywords.has(request.symbolName)
+        })
+        .map(request => ({
+            ...request,
+            position: request.position.translate({
+                lineDelta: definitionLocation.range.start.line,
+                characterDelta: definitionLocation.range.start.character,
+            }),
+        }))
+
+    if (symbolsSnippetRequests.length === 0) {
+        return [symbolContextSnippet as SymbolSnippetInflightRequest]
+    }
+
+    const definitionCacheEntry = {
+        content: definitionString,
+        relatedDefinitionKeys: new Set(),
+    } satisfies DefinitionCacheEntry
+
+    definitionCache.set(definitionLocation, definitionCacheEntry)
+
+    await getSymbolContextSnippetsRecursive({
+        symbolsSnippetRequests,
+        abortSignal,
+        recursionLimit: recursionLimit - 1,
+        parentDefinitionCacheEntryPaths: new Set([
+            symbolContextSnippet.key,
+            ...(parentDefinitionCacheEntryPaths || []),
+        ]),
+    })
+
+    return [
+        {
+            ...symbolContextSnippet,
+            ...definitionCacheEntry,
+        },
+    ]
+}
+
+interface GetSymbolContextSnippetsRecursive extends GetSymbolContextSnippetsParams {
+    parentDefinitionCacheEntryPaths?: Set<DefinitionCacheEntryPath>
+}
+
+async function getSymbolContextSnippetsRecursive(
+    params: GetSymbolContextSnippetsRecursive
+): Promise<SymbolSnippetInflightRequest[]> {
+    const { symbolsSnippetRequests, recursionLimit, parentDefinitionCacheEntryPaths, abortSignal } =
+        params
+
+    if (recursionLimit === 0) {
+        return []
+    }
+
+    const contextSnippets = await Promise.all(
+        symbolsSnippetRequests.map(symbolSnippetRequest => {
+            console.log(`requesting for "${symbolSnippetRequest.symbolName}"`)
+            return getSymbolSnippetForNodeType({
+                symbolSnippetRequest,
+                recursionLimit,
+                parentDefinitionCacheEntryPaths,
+                abortSignal,
+            })
         })
     )
 
-    return hoverSnippets.filter(isDefined).flat()
+    return contextSnippets.flat().filter(isDefined)
 }
 
-export const getSymbolContextSnippets = async (
-    symbolsSnippetRequests: SymbolSnippetsRequest[],
-    abortSignal?: AbortSignal
-): Promise<SymbolContextSnippet[]> => {
+interface GetSymbolContextSnippetsParams {
+    symbolsSnippetRequests: SymbolSnippetsRequest[]
+    abortSignal: AbortSignal
+    recursionLimit: number
+}
+
+export async function getSymbolContextSnippets(
+    params: GetSymbolContextSnippetsParams
+): Promise<SymbolContextSnippet[]> {
     const start = performance.now()
+    const result = await getSymbolContextSnippetsRecursive(params)
 
-    const contextSnippets = await Promise.all(symbolsSnippetRequests.map(getSymbolSnippetForNodeType))
-    const result = contextSnippets.flat().filter(isDefined)
+    const resultWithRelatedSnippets = result.flatMap(snippet => {
+        if (!snippet.relatedDefinitionKeys) {
+            return snippet
+        }
 
-    console.log(
-        `Got symbol snippets in ${performance.now() - start}ms`,
-        JSON.stringify(
-            result.map(r => ({
-                symbol: r.symbol,
-                content: r.content,
-            })),
-            null,
-            2
-        )
-    )
+        const relatedDefinitions = Array.from(snippet.relatedDefinitionKeys?.values())
+            .flatMap(key => {
+                const [uriKey, definitionKey] = key.split('::')
 
-    return result
+                if (key === snippet.key) {
+                    return undefined
+                }
+
+                return definitionCache.cache.get(uriKey)?.get(definitionKey)?.content
+            })
+            .filter(isDefined)
+
+        return {
+            ...snippet,
+            content: [...relatedDefinitions, snippet.content].join('\n'),
+        }
+    })
+
+    console.log(`Got symbol snippets in ${performance.now() - start}ms`)
+    // biome-ignore lint/complexity/noForEach: <explanation>
+    resultWithRelatedSnippets.forEach(r => {
+        console.log(`Context for "${r.symbol}":\n`, r.content)
+    })
+
+    return resultWithRelatedSnippets
 }
 
 function extractHoverContent(hover: vscode.Hover[]): string[] {
@@ -178,104 +329,164 @@ function extractMarkdownCodeBlock(string: string): string {
     return codeBlocks.join('\n')
 }
 
-/**
- * Convert the given Location or LocationLink into a Location.
- */
-const locationLinkToLocation = (value: vscode.Location | vscode.LocationLink): vscode.Location => {
-    return isLocationLink(value) ? new vscode.Location(value.targetUri, value.targetRange) : value
+interface DefinitionCacheEntry {
+    content: string
+    relatedDefinitionKeys?: Set<DefinitionCacheEntryPath>
 }
 
-const isLocationLink = (value: vscode.Location | vscode.LocationLink): value is vscode.LocationLink => {
-    return 'targetUri' in value
-}
+type UriString = string
+type DefinitionCacheKey = string
+type LocationCacheKey = string
+type LocationCacheEntryPath = `${UriString}::${LocationCacheKey}`
 
-async function getDefinitionLocations(
-    uri: vscode.Uri,
-    position: vscode.Position
-): Promise<vscode.Location[]> {
-    const definitions = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>(
-        'vscode.executeDefinitionProvider',
-        uri,
-        position
-    )
+const MAX_CACHED_DOCUMENTS = 100
+const MAX_CACHED_DEFINITION_LOCATIONS = 100
+const MAX_CACHED_DEFINITIONS = 100
 
-    return definitions.map(locationLinkToLocation)
-}
+class DefinitionCache {
+    public cache = new LRUCache<UriString, LRUCache<DefinitionCacheKey, DefinitionCacheEntry>>({
+        max: MAX_CACHED_DOCUMENTS,
+    })
 
-async function getTypeDefinitionLocations(
-    uri: vscode.Uri,
-    position: vscode.Position
-): Promise<vscode.Location[]> {
-    const definitions = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>(
-        'vscode.executeTypeDefinitionProvider',
-        uri,
-        position
-    )
-
-    return definitions.map(locationLinkToLocation)
-}
-
-async function getHover(uri: vscode.Uri, position: vscode.Position): Promise<vscode.Hover[]> {
-    return vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', uri, position)
-}
-
-async function getTextFromLocation(location: vscode.Location): Promise<string> {
-    const document = await vscode.workspace.openTextDocument(location.uri)
-
-    return document.getText(location.range)
-}
-
-async function getWorkspaceSymbols(query: string): Promise<vscode.SymbolInformation[]> {
-    return vscode.commands.executeCommand<vscode.SymbolInformation[]>(
-        'vscode.executeWorkspaceSymbolProvider',
-        query
-    )
-}
-
-const definitionCache = new LRUCache<string, LRUCache<string, string>>({
-    max: 100,
-})
-
-const definitionLocationCache = new LRUCache<string, LRUCache<string, vscode.Location[]>>({
-    max: 100,
-})
-
-/**
- * Keeps track of the cache keys for each document so that we can quickly
- * invalidate the cache when a document is changed.
- */
-const documentToCacheKeyMap = new Map<string, Set<string>>()
-
-function addToDocumentToCacheKeyMap(documentUri: string, cacheKey: string) {
-    const uriString = documentUri.toString()
-    if (!documentToCacheKeyMap.has(uriString)) {
-        documentToCacheKeyMap.set(uriString, new Set())
+    public toDefinitionCacheKey(location: vscode.Location): DefinitionCacheKey {
+        return `${location.range.start.line}:${location.range.start.character}`
     }
-    documentToCacheKeyMap.get(uriString)!.add(cacheKey)
+
+    public get(location: vscode.Location): DefinitionCacheEntry | undefined {
+        const documentCache = this.cache.get(location.uri.toString())
+        if (!documentCache) {
+            return undefined
+        }
+
+        return documentCache.get(this.toDefinitionCacheKey(location))
+    }
+
+    public set(location: vscode.Location, locations: DefinitionCacheEntry): void {
+        const uri = location.uri.toString()
+        let documentCache = this.cache.get(uri)
+        if (!documentCache) {
+            documentCache = new LRUCache({
+                max: MAX_CACHED_DEFINITIONS,
+            })
+            this.cache.set(uri, documentCache)
+        }
+
+        documentCache.set(this.toDefinitionCacheKey(location), locations)
+    }
+
+    public delete(location: vscode.Location): void {
+        const documentCache = this.cache.get(location.uri.toString())
+
+        if (documentCache) {
+            documentCache.delete(this.toDefinitionCacheKey(location))
+        }
+    }
+
+    public deleteDocument(uri: string) {
+        this.cache.delete(uri)
+    }
 }
 
-function removeFromDocumentToCacheKeyMap(documentUri: string, cacheKey: string) {
-    const uriString = documentUri.toString()
-    if (documentToCacheKeyMap.has(uriString)) {
-        documentToCacheKeyMap.get(uriString)!.delete(cacheKey)
-        if (documentToCacheKeyMap.get(uriString)!.size === 0) {
-            documentToCacheKeyMap.delete(uriString)
+const definitionCache = new DefinitionCache()
+
+class DefinitionLocationCache {
+    public cache = new LRUCache<UriString, LRUCache<LocationCacheKey, vscode.Location[]>>({
+        max: MAX_CACHED_DOCUMENTS,
+    })
+
+    /**
+     * Keeps track of the cache keys for each document so that we can quickly
+     * invalidate the cache when a document is changed.
+     */
+    public documentToLocationCacheKeyMap = new Map<UriString, Set<LocationCacheEntryPath>>()
+
+    public toLocationCacheKey(request: SymbolSnippetsRequest): LocationCacheKey {
+        const { position, nodeType, symbolName } = request
+        return `${position.line}:${position.character}:${nodeType}:${symbolName}`
+    }
+
+    public get(request: SymbolSnippetsRequest): vscode.Location[] | undefined {
+        const documentCache = this.cache.get(request.uri.toString())
+        if (!documentCache) {
+            return undefined
+        }
+
+        return documentCache.get(this.toLocationCacheKey(request))
+    }
+
+    public set(request: SymbolSnippetsRequest, locations: vscode.Location[]): void {
+        const uri = request.uri.toString()
+        let documentCache = this.cache.get(uri)
+        if (!documentCache) {
+            documentCache = new LRUCache({
+                max: MAX_CACHED_DEFINITION_LOCATIONS,
+            })
+            this.cache.set(uri, documentCache)
+        }
+
+        const locationCacheKey = this.toLocationCacheKey(request)
+        documentCache.set(locationCacheKey, locations)
+
+        for (const location of locations) {
+            this.addToDocumentToCacheKeyMap(location.uri.toString(), `${uri}::${locationCacheKey}`)
+        }
+    }
+
+    public delete(request: SymbolSnippetsRequest): void {
+        const documentCache = this.cache.get(request.uri.toString())
+
+        if (documentCache) {
+            documentCache.delete(this.toLocationCacheKey(request))
+        }
+    }
+
+    addToDocumentToCacheKeyMap(uri: string, cacheKey: LocationCacheEntryPath) {
+        if (!this.documentToLocationCacheKeyMap.has(uri)) {
+            this.documentToLocationCacheKeyMap.set(uri, new Set())
+        }
+        this.documentToLocationCacheKeyMap.get(uri)!.add(cacheKey)
+    }
+
+    removeFromDocumentToCacheKeyMap(uri: string, cacheKey: LocationCacheEntryPath) {
+        if (this.documentToLocationCacheKeyMap.has(uri)) {
+            this.documentToLocationCacheKeyMap.get(uri)!.delete(cacheKey)
+            if (this.documentToLocationCacheKeyMap.get(uri)!.size === 0) {
+                this.documentToLocationCacheKeyMap.delete(uri)
+            }
+        }
+    }
+
+    invalidateEntriesForDocument(uri: string) {
+        if (this.documentToLocationCacheKeyMap.has(uri)) {
+            const cacheKeysToRemove = this.documentToLocationCacheKeyMap.get(uri)!
+            for (const cacheKey of cacheKeysToRemove) {
+                const [uri, key] = cacheKey.split('::')
+                this.cache.get(uri)?.delete(key)
+                this.removeFromDocumentToCacheKeyMap(uri, cacheKey)
+            }
         }
     }
 }
+
+const definitionLocationCache = new DefinitionLocationCache()
 
 export function invalidateDocumentCache(document: vscode.TextDocument) {
     const uriString = document.uri.toString()
-    definitionCache.delete(uriString)
 
     // Remove cache items that depend on the updated document
-    if (documentToCacheKeyMap.has(uriString)) {
-        const cacheKeysToRemove = documentToCacheKeyMap.get(uriString)!
-        for (const cacheKey of cacheKeysToRemove) {
-            const [uri, key] = cacheKey.split('::')
-            definitionLocationCache.get(uri)?.delete(key)
-            definitionCache.get(uri)?.delete(key)
-            removeFromDocumentToCacheKeyMap(uriString, cacheKey)
-        }
-    }
+    definitionCache.deleteDocument(uriString)
+    definitionLocationCache.invalidateEntriesForDocument(uriString)
+}
+
+function isUnhelpfulSymbolSnippet(symbolName: string, symbolSnippet: string): boolean {
+    const trimmed = symbolSnippet.trim()
+    return (
+        symbolSnippet === '' ||
+        symbolSnippet === symbolName ||
+        !symbolSnippet.includes(symbolName) ||
+        trimmed === `interface ${symbolName}` ||
+        trimmed === `class ${symbolName}` ||
+        trimmed === `enum ${symbolName}` ||
+        trimmed === `type ${symbolName}`
+    )
 }

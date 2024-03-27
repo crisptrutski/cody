@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AbortError, TimeoutError } from '@sourcegraph/cody-shared'
 
-import { createLimiter, type Limiter } from './limiter'
+import { type Limiter, createLimiter } from './limiter'
 
 describe('limiter', () => {
     it('should limit the execution of promises', async () => {
@@ -81,7 +81,10 @@ function createMockRequest<T>(limiter: Limiter): {
 } {
     const abortController = new AbortController()
     let resolve: ((val: T) => void) | null
-    const promise = limiter<T>(async () => new Promise(_resolve => (resolve = _resolve)), abortController.signal)
+    const promise = limiter<T>(
+        async () => new Promise(_resolve => (resolve = _resolve)),
+        abortController.signal
+    )
 
     return {
         resolve(val: T) {

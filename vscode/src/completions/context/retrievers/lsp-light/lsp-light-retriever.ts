@@ -1,17 +1,11 @@
 import { debounce } from 'lodash'
-import { LRUCache } from 'lru-cache'
 import * as vscode from 'vscode'
 
 import {
     getSymbolContextSnippets,
     invalidateDocumentCache,
 } from '../../../../graph/lsp/symbol-context-snippets'
-import type {
-    ContextRetriever,
-    ContextRetrieverOptions,
-    ContextSnippet,
-    HoverContext,
-} from '../../../types'
+import type { ContextRetriever, ContextRetrieverOptions, ContextSnippet } from '../../../types'
 import { getLastNGraphContextIdentifiersFromDocument } from '../graph/identifiers'
 
 const SUPPORTED_LANGUAGES = new Set([
@@ -32,7 +26,6 @@ export interface GetGraphContextForPositionParams {
 export class LspLightRetriever implements ContextRetriever {
     public identifier = 'lsp-light'
     private disposables: vscode.Disposable[] = []
-    // private cache: GraphCache = new GraphCache()
 
     private lastRequestKey: string | null = null
     private abortLastRequest: () => void = () => {}
@@ -51,10 +44,13 @@ export class LspLightRetriever implements ContextRetriever {
         )
     }
 
-    // TODO: set a timeout on the retrieve call
+    // TODO: set a timeout on the retrieve call and return partial results if the LSP call takes too long
     // TODO: wrap individual LSP calls in OpenTelemetry traces with CPU usage data
     // TODO: add checks for LSP availability
-    public async retrieve(params: ContextRetrieverOptions): Promise<ContextSnippet[]> {
+    // TODO: index import tree proactively if the request queue is empty
+    public async retrieve(
+        params: Pick<ContextRetrieverOptions, 'document' | 'position' | 'hints'>
+    ): Promise<ContextSnippet[]> {
         const {
             document,
             position,
@@ -71,9 +67,16 @@ export class LspLightRetriever implements ContextRetriever {
         this.lastRequestKey = key
         this.abortLastRequest = () => abortController.abort()
 
-        const contextSnippets = await this.getLspContextForPosition({
+        // TODO: walk up the tree to find identifiers on the closest parent start line
+        const symbolsSnippetRequests = getLastNGraphContextIdentifiersFromDocument({
+            n: 1,
             document,
             position,
+        })
+
+        const contextSnippets = await getSymbolContextSnippets({
+            symbolsSnippetRequests,
+            recursionLimit: 3,
             abortSignal: abortController.signal,
         })
 
@@ -88,47 +91,6 @@ export class LspLightRetriever implements ContextRetriever {
 
     public isSupportedForLanguageId(languageId: string): boolean {
         return SUPPORTED_LANGUAGES.has(languageId)
-    }
-
-    private getLspContextForPosition(
-        params: GetGraphContextForPositionParams
-    ): Promise<ContextSnippet[]> {
-        const { document, position, abortSignal } = params
-        const request = {
-            document,
-            position,
-        }
-
-        // TODO: reenable top level caching
-        // const res = this.cache.get(request)
-        // if (res) {
-        //     return res
-        // }
-
-        let finished = false
-
-        // TODO: walk up the tree to find identifiers on the closest parent start line
-        const symbolRequests = getLastNGraphContextIdentifiersFromDocument({
-            n: 10,
-            document,
-            position,
-        })
-
-        const promise = getSymbolContextSnippets(symbolRequests, abortSignal).then(response => {
-            finished = true
-            return response
-        })
-
-        // Remove the aborted promise from the cache
-        // abortSignal.addEventListener('abort', () => {
-        //     if (!finished) {
-        //         this.cache.delete(request)
-        //     }
-        // })
-
-        // this.cache.set(request, promise)
-
-        return promise
     }
 
     public dispose(): void {
@@ -150,7 +112,7 @@ export class LspLightRetriever implements ContextRetriever {
         void this.retrieve({
             document: event.textEditor.document,
             position: event.selections[0].active,
-            hints: { maxChars: 0 },
+            hints: { maxChars: 0, maxMs: 150 },
         })
     }
 
@@ -162,70 +124,6 @@ export class LspLightRetriever implements ContextRetriever {
         if (event.contentChanges.length === 0 || event.document.uri.scheme !== 'file') {
             return
         }
-        // this.cache.evictForOtherDocuments(event.document.uri)
         invalidateDocumentCache(event.document)
-    }
-}
-
-interface GraphCacheParams {
-    document: vscode.TextDocument
-    line: number
-}
-const MAX_CACHED_DOCUMENTS = 10
-const MAX_CACHED_LINES = 100
-class GraphCache {
-    // This is a nested cache. The first level is the file uri, the second level is the line inside
-    // the file.
-    private cache = new LRUCache<string, LRUCache<string, Promise<HoverContext[]>>>({
-        max: MAX_CACHED_DOCUMENTS,
-    })
-
-    private toCacheKeys(key: GraphCacheParams): [string, string] {
-        return [key.document.uri.toString(), `${key.line}█${key.document.lineAt(key.line).text}`]
-    }
-
-    public get(key: GraphCacheParams): Promise<HoverContext[]> | undefined {
-        const [docKey, lineKey] = this.toCacheKeys(key)
-
-        const docCache = this.cache.get(docKey)
-        if (!docCache) {
-            return undefined
-        }
-
-        return docCache.get(lineKey)
-    }
-
-    public set(key: GraphCacheParams, entry: Promise<HoverContext[]>): void {
-        const [docKey, lineKey] = this.toCacheKeys(key)
-
-        let docCache = this.cache.get(docKey)
-        if (!docCache) {
-            docCache = new LRUCache<string, Promise<HoverContext[]>>({ max: MAX_CACHED_LINES })
-            this.cache.set(docKey, docCache)
-        }
-        docCache.set(lineKey, entry)
-    }
-
-    public delete(key: GraphCacheParams): void {
-        const [docKey, lineKey] = this.toCacheKeys(key)
-
-        const docCache = this.cache.get(docKey)
-        if (!docCache) {
-            return undefined
-        }
-        docCache.delete(lineKey)
-    }
-
-    public evictForOtherDocuments(uri: vscode.Uri): void {
-        const keysToDelete: string[] = []
-        this.cache.forEach((_, otherUri) => {
-            if (otherUri === uri.toString()) {
-                return
-            }
-            keysToDelete.push(otherUri)
-        })
-        for (const key of keysToDelete) {
-            this.cache.delete(key)
-        }
     }
 }

@@ -1,5 +1,5 @@
 import dedent from 'dedent'
-import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
+import { type Mock, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as vscode from 'vscode'
 
 import { testFileUri } from '@sourcegraph/cody-shared'
@@ -65,7 +65,9 @@ describe('LspLightRetriever', () => {
         getGraphContextFromRange = vi
             .fn()
             .mockImplementation(() =>
-                Promise.resolve([{ symbolName: 'foo', content: ['foo(): void'], uri: document1Uri.toString() }])
+                Promise.resolve([
+                    { symbolName: 'foo', content: ['foo(): void'], uri: document1Uri.toString() },
+                ])
             )
         retriever = new LspLightRetriever(
             {
@@ -210,10 +212,12 @@ describe('LspLightRetriever', () => {
 
     it('aborts the request navigating to a different line', async () => {
         let abortSignal: any
-        getGraphContextFromRange = getGraphContextFromRange.mockImplementation((_doc, _range, _abortSignal) => {
-            abortSignal = _abortSignal
-            return new Promise(() => {})
-        })
+        getGraphContextFromRange = getGraphContextFromRange.mockImplementation(
+            (_doc, _range, _abortSignal) => {
+                abortSignal = _abortSignal
+                return new Promise(() => {})
+            }
+        )
 
         await onDidChangeTextEditorSelection({
             textEditor: { document: testDocuments.document1 },

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import * as vscode from 'vscode'
-import { type URI } from 'vscode-uri'
+import type { URI } from 'vscode-uri'
 
 import { testFileUri } from '@sourcegraph/cody-shared'
 
@@ -77,11 +77,13 @@ describe('extractRelevantDocumentSymbolRanges', () => {
 
     test('returns partial document symbol ranges with selection range', async () => {
         const uri = testFile1Uri
-        const ranges = await extractRelevantDocumentSymbolRanges([{ uri, range: new vscode.Range(4, 3, 5, 5) }], () =>
-            Promise.resolve([
-                new vscode.Range(2, 0, 8, 1), // foo
-                new vscode.Range(10, 0, 16, 1), // bar
-            ])
+        const ranges = await extractRelevantDocumentSymbolRanges(
+            [{ uri, range: new vscode.Range(4, 3, 5, 5) }],
+            () =>
+                Promise.resolve([
+                    new vscode.Range(2, 0, 8, 1), // foo
+                    new vscode.Range(10, 0, 16, 1), // bar
+                ])
         )
 
         expect(ranges.map(({ uri, range }) => ({ uri: uri.fsPath, range }))).toEqual([
@@ -106,7 +108,10 @@ describe('gatherDefinitions', () => {
         )
         const getHover = (): Promise<vscode.Hover[]> => Promise.resolve([])
         // eslint-disable-next-line @typescript-eslint/require-await
-        const getDefinitions = async (uri: URI, position: vscode.Position): Promise<vscode.Location[]> => {
+        const getDefinitions = async (
+            uri: URI,
+            position: vscode.Position
+        ): Promise<vscode.Location[]> => {
             switch (position.character) {
                 case 6:
                     return [{ uri: testFile3Uri, range: new vscode.Range(7, 5, 7, 7) }]
@@ -159,35 +164,45 @@ describe('gatherDefinitions', () => {
             {
                 symbolName: 'bar',
                 hover: [],
-                definitionLocations: [{ uri: testFile1Uri.toString(), range: new vscode.Range(10, 6, 10, 9) }],
+                definitionLocations: [
+                    { uri: testFile1Uri.toString(), range: new vscode.Range(10, 6, 10, 9) },
+                ],
                 typeDefinitionLocations: [],
                 implementationLocations: [],
             },
             {
                 symbolName: 'Bar',
                 hover: [],
-                definitionLocations: [{ uri: testFile1Uri.toString(), range: new vscode.Range(11, 6, 11, 9) }],
+                definitionLocations: [
+                    { uri: testFile1Uri.toString(), range: new vscode.Range(11, 6, 11, 9) },
+                ],
                 typeDefinitionLocations: [],
                 implementationLocations: [],
             },
             {
                 symbolName: 'foo',
                 hover: [],
-                definitionLocations: [{ uri: testFile1Uri.toString(), range: new vscode.Range(2, 6, 2, 9) }],
+                definitionLocations: [
+                    { uri: testFile1Uri.toString(), range: new vscode.Range(2, 6, 2, 9) },
+                ],
                 typeDefinitionLocations: [],
                 implementationLocations: [],
             },
             {
                 symbolName: 'Foo',
                 hover: [],
-                definitionLocations: [{ uri: testFile1Uri.toString(), range: new vscode.Range(3, 6, 3, 9) }],
+                definitionLocations: [
+                    { uri: testFile1Uri.toString(), range: new vscode.Range(3, 6, 3, 9) },
+                ],
                 typeDefinitionLocations: [],
                 implementationLocations: [],
             },
             {
                 symbolName: 'baz',
                 hover: [],
-                definitionLocations: [{ uri: testFile2Uri.toString(), range: new vscode.Range(3, 6, 3, 8) }],
+                definitionLocations: [
+                    { uri: testFile2Uri.toString(), range: new vscode.Range(3, 6, 3, 8) },
+                ],
                 typeDefinitionLocations: [],
                 implementationLocations: [],
             },

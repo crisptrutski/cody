@@ -86,8 +86,8 @@ function returnStatementValue(value: Agent, flag?: boolean) {
 
 // ------------------------------------
 
-interface TestInterface {
-    //                  |
+interface TestInterface extends TestType {
+    //                                   |
 }
 
 // ------------------------------------

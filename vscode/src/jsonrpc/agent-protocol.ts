@@ -692,7 +692,7 @@ export interface GetFoldingRangeResult {
     ranges: Range[]
 }
 
-export function testLSP(params: CustomEditCommandResult) {
+export function testLSP(params: CustomEditCommandResult): EditTask {
     console.log(`
     a
     additionalDisplayItemsa
@@ -729,9 +729,21 @@ export function testLSP(params: CustomEditCommandResult) {
     Aa
     aaAtomic
     `)
+    console.log('')
+}
+
+export function testTypeDef(value: number) {
+    return !!value
 }
 
 export interface User {
     name: string
     lovesBanana: boolean
+}
+
+export class MyClass {
+    private myProperty: string
+    constructor(myProperty: string) {
+        this.myProperty = myProperty
+    }
 }

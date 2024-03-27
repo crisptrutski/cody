@@ -22,7 +22,7 @@ interface Selection {
 const getGraphContextFromSelection = async (
     selections: Selection[],
     contentMap: Map<string, string[]>,
-    recursionLimit: number = 0
+    recursionLimit = 0
 ): Promise<PreciseContext[]> => {
     const label = 'getGraphContextFromSelection'
     performance.mark(label)
@@ -57,18 +57,15 @@ const getGraphContextFromSelection = async (
 
     await updateContentMap(
         contentMap,
-        definitionMatches
-            .map(({ definitionLocations }) => definitionLocations.map(({ uri }) => uri))
-            .flat()
+        definitionMatches.flatMap(({ definitionLocations }) => definitionLocations.map(({ uri }) => uri))
     )
 
     // Resolve, extract, and deduplicate the symbol and location match pairs from the definition matches
     const matches = dedupeWith(
-        definitionMatches
-            .map(({ definitionLocations, typeDefinitionLocations, implementationLocations, ...rest }) =>
+        definitionMatches.flatMap(
+            ({ definitionLocations, typeDefinitionLocations, implementationLocations, ...rest }) =>
                 definitionLocations.map(location => ({ location, ...rest }))
-            )
-            .flat(),
+        ),
         ({ symbolName, location }) => `${symbolName}:${locationKeyFn(location)}`
     )
 

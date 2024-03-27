@@ -44,7 +44,7 @@ export class OpenTelemetryService {
             this.config.experimentalTracing ||
             (await featureFlagProvider.evaluateFeatureFlag(FeatureFlag.CodyAutocompleteTracing))
 
-        if (!isEnabled) {
+        if (true) {
             return
         }
 

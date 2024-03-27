@@ -36,16 +36,18 @@
       const result: Agent = {
 //                  ^^^^^ identifier[3]
           value: 1,
+//        ^^^^^ identifier[4]
           key: 'foo',
+//        ^^^ identifier[5]
       }
       const value = wrapper
-//                  ^^^^^^^ identifier[4]
+//                  ^^^^^^^ identifier[6]
       pick(result, ['value'])
-//    ^^^^ identifier[5]
+//    ^^^^ identifier[7]
       Agent.test()
-//          ^^^^ identifier[6]
+//          ^^^^ identifier[8]
       wrapper
-//    ^^^^^^^ identifier[7]
+//    ^^^^^^^ identifier[9]
 //           █
       return result
   }
@@ -54,10 +56,12 @@
 // identifier[1]: type_identifier
 // identifier[2]: type_identifier
 // identifier[3]: type_identifier
-// identifier[4]: identifier
-// identifier[5]: identifier
-// identifier[6]: property_identifier
+// identifier[4]: property_identifier
+// identifier[5]: property_identifier
+// identifier[6]: identifier
 // identifier[7]: identifier
+// identifier[8]: property_identifier
+// identifier[9]: identifier
 
 // ------------------------------------
 
@@ -77,17 +81,21 @@ function arrowWrapper() {
 // ------------------------------------
 
   class Parent {}
+//      ^^^^^^ identifier[1]
 
   class Agent extends Parent {
-//                    ^^^^^^ identifier[1]
+//      ^^^^^ identifier[2]
+//                    ^^^^^^ identifier[3]
       static test(): TestType { }
-//                   ^^^^^^^^ identifier[2]
+//                   ^^^^^^^^ identifier[4]
 //                             █
   }
 
 // Nodes types:
-// identifier[1]: identifier
+// identifier[1]: type_identifier
 // identifier[2]: type_identifier
+// identifier[3]: identifier
+// identifier[4]: type_identifier
 
 // ------------------------------------
 
@@ -131,15 +139,25 @@ function returnStatement() {
 
 // ------------------------------------
 
-interface TestInterface {
-    //                  |
-}
+  interface TestInterface extends TestType {
+//          ^^^^^^^^^^^^^ identifier[1]
+//                                ^^^^^^^^ identifier[2]
+//                                         █
+  }
+
+// Nodes types:
+// identifier[1]: type_identifier
+// identifier[2]: type_identifier
 
 // ------------------------------------
 
-type TestType = {
-    //          |
-}
+  type TestType = {
+//     ^^^^^^^^ identifier[1]
+//                █
+  }
+
+// Nodes types:
+// identifier[1]: type_identifier
 
 // ------------------------------------
 
@@ -170,10 +188,14 @@ type TestType = {
 
 // ------------------------------------
 
-const object = {
-    key: 'value',
-    //   |
-}
+  const object = {
+      key: 'value',
+//    ^^^ identifier[1]
+//         █
+  }
+
+// Nodes types:
+// identifier[1]: property_identifier
 
 // ------------------------------------
 
@@ -190,10 +212,12 @@ const object = {
 
   returnStatementValue('value', { key: value })
 //^^^^^^^^^^^^^^^^^^^^ identifier[1]
+//                                ^^^ identifier[2]
 //                                    █
 
 // Nodes types:
 // identifier[1]: identifier
+// identifier[2]: property_identifier
 
 // ------------------------------------
 
