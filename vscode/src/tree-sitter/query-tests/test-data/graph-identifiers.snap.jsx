@@ -16,6 +16,7 @@
 //            ^^^ identifier[4]
       sentry.captureException(new Error('hello world'))
 //           ^^^^^^^^^^^^^^^^ identifier[5]
+//                                ^^^^^ identifier[6]
       function test() {
 //                    █
       }
@@ -27,6 +28,7 @@
 // identifier[3]: identifier
 // identifier[4]: property_identifier
 // identifier[5]: property_identifier
+// identifier[6]: identifier
 
 // ------------------------------------
 

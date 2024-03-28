@@ -196,6 +196,8 @@ const JS_SHARED_CONTEXT_IDENTIFIERS_QUERY = dedent`
     (member_expression (property_identifier) @identifier)
     (pair (property_identifier) @identifier)
     (variable_declarator value: (identifier) @identifier)
+    (labeled_statement body: (expression_statement (identifier) @identifier))
+    (labeled_statement body: (expression_statement (_ (identifier) @identifier)))
 `
 
 const JS_GRAPH_CONTEXT_IDENTIFIERS_QUERY = dedent`

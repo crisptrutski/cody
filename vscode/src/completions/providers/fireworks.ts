@@ -34,7 +34,6 @@ import {
     recordErrorToSpan,
     tracer,
 } from '@sourcegraph/cody-shared/src/tracing'
-import { ConsoleTelemetryExporter } from '@sourcegraph/telemetry'
 import { logDebug } from '../../log'
 import { createRateLimitErrorFromResponse } from '../client'
 import {
@@ -331,11 +330,6 @@ class FireworksProvider extends Provider {
         return this.client.complete(requestParams, abortController)
     }
 
-    private createSlowPathClient(
-        requestParams: CodeCompletionsParams,
-        abortController: AbortController
-    ): CompletionResponseGenerator {}
-
     // When using the fast path, the Cody client talks directly to Cody Gateway. Since CG only
     // proxies to the upstream API, we have to first convert the request to a Fireworks API
     // compatible payload. We also have to manually convert SSE response chunks.
@@ -397,7 +391,6 @@ class FireworksProvider extends Provider {
                 console.log('fireworksRequest', fireworksRequest)
 
                 logDebug('FireworksProvider', 'fetch', { verbose: { url, fireworksRequest } })
-                const fetchStart = performance.now()
                 const response = await fetch(url, {
                     method: 'POST',
                     body: JSON.stringify(fireworksRequest),
@@ -485,12 +478,6 @@ class FireworksProvider extends Provider {
                                     ? lastResponse.stopReason
                                     : CompletionStopReason.StreamingChunk),
                         }
-
-                        // console.log({
-                        //     text: choice.text,
-                        //     charCount: lastResponse.completion.length,
-                        //     latency: performance.now() - fetchStart,
-                        // })
 
                         span.addEvent('yield', { stopReason: lastResponse.stopReason })
                         yield lastResponse

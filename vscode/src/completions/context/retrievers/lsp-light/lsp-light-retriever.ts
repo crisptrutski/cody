@@ -5,17 +5,22 @@ import {
     getSymbolContextSnippets,
     invalidateDocumentCache,
 } from '../../../../graph/lsp/symbol-context-snippets'
+import { SupportedLanguage } from '../../../../tree-sitter/grammars'
 import type { ContextRetriever, ContextRetrieverOptions, ContextSnippet } from '../../../types'
 import { getLastNGraphContextIdentifiersFromDocument } from '../graph/identifiers'
 
 const SUPPORTED_LANGUAGES = new Set([
-    'python',
-    'go',
-    'javascript',
-    'javascriptreact',
-    'typescript',
-    'typescriptreact',
+    SupportedLanguage.python,
+    SupportedLanguage.go,
+    SupportedLanguage.javascript,
+    SupportedLanguage.javascriptreact,
+    SupportedLanguage.typescript,
+    SupportedLanguage.typescriptreact,
 ])
+
+interface RetrieveParams extends Pick<ContextRetrieverOptions, 'document' | 'position' | 'hints'> {}
+const RECURSION_LIMIT = 3
+const IDENTIFIERS_TO_RESOLVE = 1
 
 export interface GetGraphContextForPositionParams {
     document: vscode.TextDocument
@@ -33,7 +38,8 @@ export class LspLightRetriever implements ContextRetriever {
     constructor(
         // All arguments are optional, because they are only used in tests.
         private window: Pick<typeof vscode.window, 'onDidChangeTextEditorSelection'> = vscode.window,
-        private workspace: Pick<typeof vscode.workspace, 'onDidChangeTextDocument'> = vscode.workspace
+        private workspace: Pick<typeof vscode.workspace, 'onDidChangeTextDocument'> = vscode.workspace,
+        private retrieveSymbolContextSnippets: typeof getSymbolContextSnippets = getSymbolContextSnippets
     ) {
         const onSelectionChange = debounce(this.onDidChangeTextEditorSelection.bind(this), 100)
         const onTextChange = debounce(this.onDidChangeTextDocument.bind(this), 50)
@@ -45,12 +51,9 @@ export class LspLightRetriever implements ContextRetriever {
     }
 
     // TODO: set a timeout on the retrieve call and return partial results if the LSP call takes too long
-    // TODO: wrap individual LSP calls in OpenTelemetry traces with CPU usage data
-    // TODO: add checks for LSP availability
+    // TODO: collect information about CPU usage data
     // TODO: index import tree proactively if the request queue is empty
-    public async retrieve(
-        params: Pick<ContextRetrieverOptions, 'document' | 'position' | 'hints'>
-    ): Promise<ContextSnippet[]> {
+    public async retrieve(params: RetrieveParams): Promise<ContextSnippet[]> {
         const {
             document,
             position,
@@ -69,20 +72,19 @@ export class LspLightRetriever implements ContextRetriever {
 
         // TODO: walk up the tree to find identifiers on the closest parent start line
         const symbolsSnippetRequests = getLastNGraphContextIdentifiersFromDocument({
-            n: 1,
+            n: IDENTIFIERS_TO_RESOLVE,
             document,
             position,
         })
 
-        const contextSnippets = await getSymbolContextSnippets({
+        const contextSnippets = await this.retrieveSymbolContextSnippets({
             symbolsSnippetRequests,
-            recursionLimit: 3,
+            recursionLimit: RECURSION_LIMIT,
             abortSignal: abortController.signal,
         })
 
         if (maxChars === 0) {
-            // This is likely just a preloading request, so we don't need to prepare the actual
-            // context
+            // This is likely just a preloading request, so we don't need to prepare the actual context
             return []
         }
 
@@ -90,7 +92,7 @@ export class LspLightRetriever implements ContextRetriever {
     }
 
     public isSupportedForLanguageId(languageId: string): boolean {
-        return SUPPORTED_LANGUAGES.has(languageId)
+        return SUPPORTED_LANGUAGES.has(languageId as SupportedLanguage)
     }
 
     public dispose(): void {
@@ -117,8 +119,7 @@ export class LspLightRetriever implements ContextRetriever {
     }
 
     /**
-     * Whenever there are changes to a document, all cached contexts for other documents must be
-     * evicted
+     * Whenever there are changes to a document, all relevant contexts must be evicted
      */
     private onDidChangeTextDocument(event: vscode.TextDocumentChangeEvent): void {
         if (event.contentChanges.length === 0 || event.document.uri.scheme !== 'file') {

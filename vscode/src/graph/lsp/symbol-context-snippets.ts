@@ -1,11 +1,11 @@
 import { LRUCache } from 'lru-cache'
 import type * as vscode from 'vscode'
 
-import { isDefined } from '@sourcegraph/cody-shared'
+import { isDefined, wrapInActiveSpan } from '@sourcegraph/cody-shared'
 
 import { getLastNGraphContextIdentifiersFromString } from '../../completions/context/retrievers/graph/identifiers'
 import type { SymbolContextSnippet } from '../../completions/types'
-import { commonKeywords } from './languages'
+import { commonKeywords, isCommonImport } from './languages'
 import { createLimiter } from './limiter'
 import {
     getDefinitionLocations,
@@ -13,15 +13,17 @@ import {
     getImplementationLocations,
     getTextFromLocation,
     getTypeDefinitionLocations,
-} from './lsp'
+} from './lsp-commands'
 
-const limiter = createLimiter({
+const lspRequestLimiter = createLimiter({
     // The concurrent requests limit is chosen very conservatively to avoid blocking the language
     // server.
     limit: 3,
     // If any language server API takes more than 2 seconds to answer, we should cancel the request
     timeout: 2000,
 })
+
+const NESTED_IDENTIFIERS_TO_RESOLVE = 5
 
 interface SymbolSnippetsRequest {
     symbolName: string
@@ -45,23 +47,23 @@ interface GetSymbolSnippetForNodeTypeParams {
     abortSignal: AbortSignal
 }
 
-type Optional<T, K extends keyof T> = Pick<Partial<T>, K> & Omit<T, K>
-type PartialSymbolSnippetInflightRequest = Optional<SymbolSnippetInflightRequest, 'content'>
-
 function updateParentDefinitionKeys(
     parentDefinitionCacheEntryPaths: GetSymbolSnippetForNodeTypeParams['parentDefinitionCacheEntryPaths'],
     symbolContextSnippet: PartialSymbolSnippetInflightRequest
 ) {
     if (parentDefinitionCacheEntryPaths) {
         for (const parentDefinitionCacheEntryPath of parentDefinitionCacheEntryPaths) {
-            const [uriKey, definitionKey] = parentDefinitionCacheEntryPath.split('::')
-            definitionCache.cache
-                .get(uriKey)
-                ?.get(definitionKey)
-                ?.relatedDefinitionKeys?.add(symbolContextSnippet.key)
+            const entry = definitionCache.getByPath(parentDefinitionCacheEntryPath)
+
+            if (!isEmptyCacheEntry(entry)) {
+                entry?.relatedDefinitionKeys?.add(symbolContextSnippet.key)
+            }
         }
     }
 }
+
+type Optional<T, K extends keyof T> = { [key in K]: T[K] | undefined } & Omit<T, K>
+type PartialSymbolSnippetInflightRequest = Optional<SymbolSnippetInflightRequest, 'content'>
 
 async function getSymbolSnippetForNodeType(
     params: GetSymbolSnippetForNodeTypeParams
@@ -73,35 +75,41 @@ async function getSymbolSnippetForNodeType(
         parentDefinitionCacheEntryPaths,
         abortSignal,
     } = params
+
     async function getSnippetForLocationGetter(
         locationGetter: typeof getDefinitionLocations
     ): Promise<PartialSymbolSnippetInflightRequest | undefined> {
         let definitionLocations = definitionLocationCache.get(symbolSnippetRequest)
 
-        if (!definitionLocations) {
-            definitionLocations = await limiter(() => locationGetter(uri, position))
+        if (isEmptyCacheEntry(definitionLocations)) {
+            return undefined
         }
 
-        if (definitionLocations.length === 0) {
-            console.log(`no definition locations for ${symbolName} at ${uri} and ${position}`)
-            definitionLocationCache.delete(symbolSnippetRequest)
-            return undefined
+        if (!definitionLocations) {
+            definitionLocations = await lspRequestLimiter(() => locationGetter(uri, position))
         }
 
         const [definitionLocation] = definitionLocations
 
+        if (
+            definitionLocation === undefined ||
+            (definitionLocation && isCommonImport(definitionLocation.uri))
+        ) {
+            return undefined
+        }
+
         const { uri: definitionUri, range: definitionRange } = definitionLocation
-        const definitionUriString = definitionUri.toString()
         const definitionCacheKey = `${definitionRange.start.line}:${definitionRange.start.character}`
 
         const symbolContextSnippet = {
-            key: `${definitionUriString}::${definitionCacheKey}`,
+            key: `${definitionUri}::${definitionCacheKey}`,
             uri: definitionUri,
             startLine: definitionRange.start.line,
             endLine: definitionRange.end.line,
             symbol: symbolName,
             location: definitionLocation,
-        } satisfies Omit<SymbolSnippetInflightRequest, 'content'>
+            content: undefined,
+        } satisfies PartialSymbolSnippetInflightRequest
 
         const cachedDefinition = definitionCache.get(definitionLocation)
         if (cachedDefinition) {
@@ -122,7 +130,7 @@ async function getSymbolSnippetForNodeType(
                 break
             }
             default: {
-                const hoverContent = await limiter(
+                const hoverContent = await lspRequestLimiter(
                     () => getHover(definitionLocation.uri, definitionLocation.range.start),
                     abortSignal
                 )
@@ -141,21 +149,72 @@ async function getSymbolSnippetForNodeType(
         }
 
         definitionLocationCache.set(symbolSnippetRequest, definitionLocations)
+        definitionCache.set(definitionLocation, { content: definitionString })
+        updateParentDefinitionKeys(parentDefinitionCacheEntryPaths, symbolContextSnippet)
+
+        const symbolsSnippetRequests = getLastNGraphContextIdentifiersFromString({
+            n: NESTED_IDENTIFIERS_TO_RESOLVE,
+            uri: definitionLocation.uri,
+            languageId,
+            source: definitionString,
+        })
+            .filter(request => {
+                return symbolName !== request.symbolName && !commonKeywords.has(request.symbolName)
+            })
+            .map(request => ({
+                ...request,
+                position: request.position.translate({
+                    lineDelta: definitionLocation.range.start.line,
+                    characterDelta: definitionLocation.range.start.character,
+                }),
+            }))
+
+        if (symbolsSnippetRequests.length === 0) {
+            return {
+                ...symbolContextSnippet,
+                content: definitionString,
+            }
+        }
+
+        const definitionCacheEntry = {
+            content: definitionString,
+            relatedDefinitionKeys: new Set(),
+        } satisfies DefinitionCacheEntry
+
+        definitionCache.set(definitionLocation, definitionCacheEntry)
+
+        await getSymbolContextSnippetsRecursive({
+            symbolsSnippetRequests,
+            abortSignal,
+            recursionLimit: recursionLimit - 1,
+            parentDefinitionCacheEntryPaths: new Set([
+                symbolContextSnippet.key,
+                ...(parentDefinitionCacheEntryPaths || []),
+            ]),
+        })
 
         return {
             ...symbolContextSnippet,
-            content: definitionString,
+            ...definitionCacheEntry,
         }
     }
 
-    let getters = [getTypeDefinitionLocations, getImplementationLocations, getDefinitionLocations]
+    let locationGetters = [
+        getTypeDefinitionLocations,
+        getImplementationLocations,
+        getDefinitionLocations,
+    ]
     if (['property_identifier', 'type_identifier'].includes(nodeType)) {
-        getters = [getDefinitionLocations, getTypeDefinitionLocations, getImplementationLocations]
+        locationGetters = [
+            getDefinitionLocations,
+            getTypeDefinitionLocations,
+            getImplementationLocations,
+        ]
     }
 
     let symbolContextSnippet: PartialSymbolSnippetInflightRequest | undefined
-    for (const getter of getters) {
-        symbolContextSnippet = await getSnippetForLocationGetter(getter)
+    for (const locationGetter of locationGetters) {
+        symbolContextSnippet = await getSnippetForLocationGetter(locationGetter)
 
         if (symbolContextSnippet?.content !== undefined) {
             break
@@ -166,6 +225,7 @@ async function getSymbolSnippetForNodeType(
         console.log(
             `failed to find definition location for symbol ${symbolName} at ${uri} and ${position}`
         )
+        definitionLocationCache.set(symbolSnippetRequest, EMPTY_CACHE_ENTRY)
         return undefined
     }
 
@@ -173,59 +233,11 @@ async function getSymbolSnippetForNodeType(
         console.log(
             `no definition for symbol ${symbolName} at ${symbolContextSnippet.uri} and ${symbolContextSnippet.startLine}`
         )
-        definitionCache.delete(symbolContextSnippet.location)
+        definitionCache.set(symbolContextSnippet.location, EMPTY_CACHE_ENTRY)
         return undefined
     }
 
-    const { location: definitionLocation, content: definitionString } = symbolContextSnippet
-
-    definitionCache.set(definitionLocation, { content: definitionString })
-    updateParentDefinitionKeys(parentDefinitionCacheEntryPaths, symbolContextSnippet)
-
-    const symbolsSnippetRequests = getLastNGraphContextIdentifiersFromString({
-        n: 5,
-        uri: definitionLocation.uri,
-        languageId,
-        source: definitionString,
-    })
-        .filter(request => {
-            return symbolName !== request.symbolName && !commonKeywords.has(request.symbolName)
-        })
-        .map(request => ({
-            ...request,
-            position: request.position.translate({
-                lineDelta: definitionLocation.range.start.line,
-                characterDelta: definitionLocation.range.start.character,
-            }),
-        }))
-
-    if (symbolsSnippetRequests.length === 0) {
-        return [symbolContextSnippet as SymbolSnippetInflightRequest]
-    }
-
-    const definitionCacheEntry = {
-        content: definitionString,
-        relatedDefinitionKeys: new Set(),
-    } satisfies DefinitionCacheEntry
-
-    definitionCache.set(definitionLocation, definitionCacheEntry)
-
-    await getSymbolContextSnippetsRecursive({
-        symbolsSnippetRequests,
-        abortSignal,
-        recursionLimit: recursionLimit - 1,
-        parentDefinitionCacheEntryPaths: new Set([
-            symbolContextSnippet.key,
-            ...(parentDefinitionCacheEntryPaths || []),
-        ]),
-    })
-
-    return [
-        {
-            ...symbolContextSnippet,
-            ...definitionCacheEntry,
-        },
-    ]
+    return [symbolContextSnippet as SymbolSnippetInflightRequest]
 }
 
 interface GetSymbolContextSnippetsRecursive extends GetSymbolContextSnippetsParams {
@@ -267,7 +279,10 @@ export async function getSymbolContextSnippets(
     params: GetSymbolContextSnippetsParams
 ): Promise<SymbolContextSnippet[]> {
     const start = performance.now()
-    const result = await getSymbolContextSnippetsRecursive(params)
+
+    const result = await wrapInActiveSpan('getSymbolContextSnippetsRecursive', () => {
+        return getSymbolContextSnippetsRecursive(params)
+    })
 
     const resultWithRelatedSnippets = result.flatMap(snippet => {
         if (!snippet.relatedDefinitionKeys) {
@@ -276,13 +291,17 @@ export async function getSymbolContextSnippets(
 
         const relatedDefinitions = Array.from(snippet.relatedDefinitionKeys?.values())
             .flatMap(key => {
-                const [uriKey, definitionKey] = key.split('::')
-
                 if (key === snippet.key) {
                     return undefined
                 }
 
-                return definitionCache.cache.get(uriKey)?.get(definitionKey)?.content
+                const entry = definitionCache.getByPath(key)
+
+                if (isEmptyCacheEntry(entry)) {
+                    return undefined
+                }
+
+                return entry?.content
             })
             .filter(isDefined)
 
@@ -329,10 +348,11 @@ function extractMarkdownCodeBlock(string: string): string {
     return codeBlocks.join('\n')
 }
 
-interface DefinitionCacheEntry {
+interface DefinitionCacheEntryValue {
     content: string
     relatedDefinitionKeys?: Set<DefinitionCacheEntryPath>
 }
+type DefinitionCacheEntry = DefinitionCacheEntryValue | typeof EMPTY_CACHE_ENTRY
 
 type UriString = string
 type DefinitionCacheKey = string
@@ -359,6 +379,11 @@ class DefinitionCache {
         }
 
         return documentCache.get(this.toDefinitionCacheKey(location))
+    }
+
+    public getByPath(path: LocationCacheEntryPath): DefinitionCacheEntry | undefined {
+        const [uri, key] = path.split('::')
+        return this.cache.get(uri)?.get(key)
     }
 
     public set(location: vscode.Location, locations: DefinitionCacheEntry): void {
@@ -389,8 +414,17 @@ class DefinitionCache {
 
 const definitionCache = new DefinitionCache()
 
+const EMPTY_CACHE_ENTRY = { isEmptyCacheEntry: true } as const
+type DefinitionLocationCacheEntry = vscode.Location[] | typeof EMPTY_CACHE_ENTRY
+
+function isEmptyCacheEntry(
+    value?: DefinitionLocationCacheEntry | DefinitionCacheEntry
+): value is typeof EMPTY_CACHE_ENTRY {
+    return Boolean(value && 'isEmptyCacheEntry' in value)
+}
+
 class DefinitionLocationCache {
-    public cache = new LRUCache<UriString, LRUCache<LocationCacheKey, vscode.Location[]>>({
+    public cache = new LRUCache<UriString, LRUCache<LocationCacheKey, DefinitionLocationCacheEntry>>({
         max: MAX_CACHED_DOCUMENTS,
     })
 
@@ -405,7 +439,7 @@ class DefinitionLocationCache {
         return `${position.line}:${position.character}:${nodeType}:${symbolName}`
     }
 
-    public get(request: SymbolSnippetsRequest): vscode.Location[] | undefined {
+    public get(request: SymbolSnippetsRequest): DefinitionLocationCacheEntry | undefined {
         const documentCache = this.cache.get(request.uri.toString())
         if (!documentCache) {
             return undefined
@@ -414,7 +448,7 @@ class DefinitionLocationCache {
         return documentCache.get(this.toLocationCacheKey(request))
     }
 
-    public set(request: SymbolSnippetsRequest, locations: vscode.Location[]): void {
+    public set(request: SymbolSnippetsRequest, value: DefinitionLocationCacheEntry): void {
         const uri = request.uri.toString()
         let documentCache = this.cache.get(uri)
         if (!documentCache) {
@@ -425,10 +459,12 @@ class DefinitionLocationCache {
         }
 
         const locationCacheKey = this.toLocationCacheKey(request)
-        documentCache.set(locationCacheKey, locations)
+        documentCache.set(locationCacheKey, value)
 
-        for (const location of locations) {
-            this.addToDocumentToCacheKeyMap(location.uri.toString(), `${uri}::${locationCacheKey}`)
+        if (!isEmptyCacheEntry(value)) {
+            for (const location of value) {
+                this.addToDocumentToCacheKeyMap(location.uri.toString(), `${uri}::${locationCacheKey}`)
+            }
         }
     }
 
@@ -485,7 +521,6 @@ function isUnhelpfulSymbolSnippet(symbolName: string, symbolSnippet: string): bo
         symbolSnippet === symbolName ||
         !symbolSnippet.includes(symbolName) ||
         trimmed === `interface ${symbolName}` ||
-        trimmed === `class ${symbolName}` ||
         trimmed === `enum ${symbolName}` ||
         trimmed === `type ${symbolName}`
     )
