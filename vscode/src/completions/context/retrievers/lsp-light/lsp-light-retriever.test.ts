@@ -148,17 +148,11 @@ describe('LspLightRetriever', () => {
             hints: { maxChars: 100, maxMs: 1000 },
         })
 
-        expect(withPosixPaths(snippet)).toMatchInlineSnapshot(`
-          [
-            {
-              "content": [
-                "log(): void",
-              ],
-              "symbolName": "log",
-              "uri": "file:///document1.ts",
-            },
-          ]
-        `)
+        expect(withPosixPaths(snippet)).toMatchObject({
+            content: ['log(): void'],
+            symbolName: 'log',
+            uri: document1Uri.toString(),
+        })
     })
 
     it('aborts the request navigating to a different line', async () => {
