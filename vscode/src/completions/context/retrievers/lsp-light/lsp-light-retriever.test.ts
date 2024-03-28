@@ -142,15 +142,13 @@ describe('LspLightRetriever', () => {
 
         getSymbolContextSnippets.mockClear()
 
-        expect(
-            withPosixPaths(
-                await retriever.retrieve({
-                    document: testDocuments.document1,
-                    position: new Position(3, 0),
-                    hints: { maxChars: 100, maxMs: 1000 },
-                })
-            )
-        ).toMatchInlineSnapshot(`
+        const [snippet] = await retriever.retrieve({
+            document: testDocuments.document1,
+            position: new Position(3, 0),
+            hints: { maxChars: 100, maxMs: 1000 },
+        })
+
+        expect(withPosixPaths(snippet)).toMatchInlineSnapshot(`
           [
             {
               "content": [
