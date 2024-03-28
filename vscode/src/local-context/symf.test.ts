@@ -11,7 +11,7 @@ import { tmpdir } from 'os'
 import path from 'path'
 import { mkdtemp, open, rmdir } from 'fs/promises'
 
-describe.skip('symf', () => {
+describe('symf', () => {
     const client = new SourcegraphNodeCompletionsClient({
         accessToken:
             // The redacted ID below is copy-pasted from the recording file and needs to be updated

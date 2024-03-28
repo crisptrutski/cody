@@ -418,7 +418,7 @@ function getCompletionProvider(params: GetCompletionProvidersParams): Provider {
 
     // Show more if manually triggered (but only showing 1 is faster, so we use it
     // in the automatic trigger case).
-    const n = triggerKind === TriggerKind.Automatic ? 1 : 1
+    const n = triggerKind === TriggerKind.Automatic ? 1 : 3
 
     if (docContext.multilineTrigger) {
         return providerConfig.create({

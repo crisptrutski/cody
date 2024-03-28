@@ -364,7 +364,7 @@ class FireworksProvider extends Provider {
                     model:
                         self.fireworksConfig?.model || requestParams.model?.replace(/^fireworks\//, ''),
                     prompt,
-                    max_tokens: 9999,
+                    max_tokens: requestParams.maxTokensToSample,
                     echo: false,
                     temperature:
                         self.fireworksConfig?.parameters?.temperature || requestParams.temperature,
@@ -388,7 +388,6 @@ class FireworksProvider extends Provider {
                 headers.set('Authorization', `Bearer ${self.fastPathAccessToken}`)
                 headers.set('X-Sourcegraph-Feature', 'code_completions')
                 addTraceparent(headers)
-                console.log('fireworksRequest', fireworksRequest)
 
                 logDebug('FireworksProvider', 'fetch', { verbose: { url, fireworksRequest } })
                 const response = await fetch(url, {
@@ -455,8 +454,6 @@ class FireworksProvider extends Provider {
                             }
                             break
                         }
-
-                        // console.log(data)
 
                         // [DONE] is a special non-JSON message to indicate the end of the stream
                         if (data === '[DONE]') {
